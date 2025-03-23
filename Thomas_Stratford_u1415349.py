@@ -98,7 +98,6 @@ class SimpleLoadBalancer(object):
 
     def _handle_ConnectionUp(self, event):
         event.connection.addListeners(self)
-        log.info("Switch connected: %s", event.connection)
 
 # Start the controller
 def launch():
