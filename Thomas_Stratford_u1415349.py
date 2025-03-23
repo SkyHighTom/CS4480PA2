@@ -44,7 +44,6 @@ class SimpleLoadBalancer(object):
         log.info("Responded to ARP request: %s -> %s (%s)", client_ip, target_ip, target_mac)
 
     def _handle_ConnectionUp(self, event):
-        log.info("Switch connected: %s", event.connection)
         event.connection.addListeners(self)
 
 # Start the controller
