@@ -1,111 +1,67 @@
 from pox.core import core
 import pox.openflow.libopenflow_01 as of
-from pox.lib.addresses import IPAddr, EthAddr
-from pox.lib.packet.ethernet import ethernet
-from pox.lib.packet.arp import arp
-from pox.lib.packet.ipv4 import ipv4
 from collections import deque
 
 log = core.getLogger()
 
-class BasicLoadBalancer(object):
-    def __init__(self, vip="10.0.0.1", servers=["10.0.0.5", "10.0.0.6"]):
-        self.vip = IPAddr(vip)
-        self.servers = deque(map(IPAddr, servers))  # Round-robin queue
+class SimpleLoadBalancer(object):
+    def __init__(self, vip="10.0.0.100", servers=None):
+        self.vip = vip
+        self.servers = deque(servers) if servers else deque(["10.0.0.1", "10.0.0.2"])
         self.mac_map = {}  # Maps IP addresses to MAC addresses
-        self.next_server = {}  # Tracks assigned servers for clients
-
+        self.next_server = {}  # Tracks the next server for each client
         core.openflow.addListeners(self)
-        log.info("Basic Load Balancer initialized.")
-
-    def _handle_ConnectionUp(self, event):
-        event.connection.addListeners(self)
-        log.info("Switch connected.")
+        log.info("Load Balancer initialized with VIP %s", self.vip)
 
     def _handle_PacketIn(self, event):
         packet = event.parsed
         if not packet.parsed:
             return
-
-        # Handle ARP Requests
-        arp_packet = packet.find("arp")
-        if arp_packet and arp_packet.opcode == arp.REQUEST:
-            self.handle_arp_request(event, arp_packet)
-            return
-
-        # Handle ICMP Requests
+        
+        in_port = event.port
         ip_packet = packet.find("ipv4")
-        if ip_packet and ip_packet.protocol == ipv4.ICMP_PROTOCOL:
-            self.handle_icmp_request(event, ip_packet)
-            return
+        arp_packet = packet.find("arp")
 
-    def handle_arp_request(self, event, arp_packet):
-        src_ip = arp_packet.protosrc
-        dst_ip = arp_packet.protodst
-        src_mac = arp_packet.hwsrc
+        if arp_packet and arp_packet.protodst == self.vip:
+            log.debug("Handling ARP request for VIP: %s", self.vip)
+            self.handle_arp_request(event, arp_packet, in_port)
 
-        # Store MAC address of requester
-        self.mac_map[src_ip] = src_mac
-
-        if dst_ip == self.vip:
-            if src_ip not in self.next_server:
-                self.next_server[src_ip] = self.servers[0]
-                self.servers.rotate(-1)
-
-            target_ip = self.next_server[src_ip]
-            target_mac = self.mac_map.get(target_ip)
-
-            if not target_mac:
-                log.info("MAC address for %s not yet known, waiting.", target_ip)
-                return
-
-            self.send_arp_reply(event, src_ip, src_mac, target_ip, target_mac)
-
-    def send_arp_reply(self, event, src_ip, src_mac, target_ip, target_mac):
-        arp_reply = arp()
-        arp_reply.opcode = arp.REPLY
-        arp_reply.protosrc = target_ip
-        arp_reply.protodst = src_ip
-        arp_reply.hwsrc = target_mac
-        arp_reply.hwdst = src_mac
-
-        eth = ethernet()
-        eth.type = ethernet.ARP_TYPE
-        eth.src = target_mac
-        eth.dst = src_mac
-        eth.payload = arp_reply
-
-        msg = of.ofp_packet_out()
-        msg.data = eth.pack()
-        msg.actions.append(of.ofp_action_output(port=event.port))
-        event.connection.send(msg)
-
-        log.info("Sent ARP reply: %s -> %s (%s)", target_ip, src_ip, target_mac)
-
-    def handle_icmp_request(self, event, ip_packet):
-        client_ip = ip_packet.srcip
+    def handle_arp_request(self, event, arp_packet, in_port):
+        client_ip = arp_packet.protosrc
         if client_ip not in self.next_server:
-            return
-
+            self.next_server[client_ip] = self.servers[0]  # Assign next server
+            self.servers.rotate(-1)  # Rotate to next server
+        
         target_ip = self.next_server[client_ip]
-        target_mac = self.mac_map.get(target_ip)
+        if target_ip in self.mac_map:
+            target_mac = self.mac_map[target_ip]
+        else:
+            return  # If MAC address is unknown, we wait
+        
+        arp_reply = of.ofp_packet_out()
+        arp_reply.actions.append(of.ofp_action_output(port=in_port))
+        arp_reply.data = event.data
+        event.connection.send(arp_reply)
+        log.info("Responded to ARP request: %s -> %s (%s)", client_ip, target_ip, target_mac)
 
-        if not target_mac:
-            return
+        # Install flow to forward to the correct server
+        self.install_flow(event, in_port, target_ip, target_mac)
 
-        msg = of.ofp_flow_mod()
-        msg.match.dl_type = ethernet.IP_TYPE
-        msg.match.nw_proto = ipv4.ICMP_PROTOCOL
-        msg.match.nw_dst = self.vip
+    def install_flow(self, event, in_port, target_ip, target_mac):
+        # Create a flow mod to forward packets to the target MAC address
+        flow_mod = of.ofp_flow_mod()
+        flow_mod.match = of.ofp_match(in_port=in_port, dl_type=0x0800, nw_dst=self.vip)
+        flow_mod.actions.append(of.ofp_action_dl_addr.set_dst(target_mac))
+        flow_mod.actions.append(of.ofp_action_output(port=in_port))  # Send to the correct port
+        
+        # Send flow mod to switch
+        event.connection.send(flow_mod)
+        log.debug("Flow installed for %s -> %s via MAC %s", self.vip, target_ip, target_mac)
 
-        msg.actions.append(of.ofp_action_nw_addr.set_dst(target_ip))  # Not available in OpenFlow 1.0
-        msg.actions.append(of.ofp_action_dl_addr.set_dst(target_mac))  # Not available in OpenFlow 1.0
-        msg.actions.append(of.ofp_action_output(port=of.OFPP_FLOOD))
+    def _handle_ConnectionUp(self, event):
+        log.info("Switch connected: %s", event.connection)
+        event.connection.addListeners(self)
 
-        event.connection.send(msg)
-
-        log.info("Forwarding ICMP %s -> %s", client_ip, target_ip)
-
-
+# Start the controller
 def launch():
-    core.registerNew(BasicLoadBalancer)
+    core.registerNew(SimpleLoadBalancer)
