@@ -1,13 +1,16 @@
 from pox.core import core
 import pox.openflow.libopenflow_01 as of
+from pox.lib.packet.ethernet import ethernet
+from pox.lib.packet.arp import arp
+from pox.lib.addresses import IPAddr, EthAddr
 from collections import deque
 
 log = core.getLogger()
 
 class SimpleLoadBalancer(object):
     def __init__(self, vip="10.0.0.100", servers=None):
-        self.vip = vip
-        self.servers = deque(servers) if servers else deque(["10.0.0.1", "10.0.0.2"])
+        self.vip = IPAddr(vip)
+        self.servers = deque(servers) if servers else deque([IPAddr("10.0.0.5"), IPAddr("10.0.0.6")])
         self.mac_map = {}  # Maps IP addresses to MAC addresses
         self.next_server = {}  # Tracks the next server for each client
         core.openflow.addListeners(self)
@@ -17,51 +20,72 @@ class SimpleLoadBalancer(object):
         packet = event.parsed
         if not packet.parsed:
             return
+
+        if packet.type == ethernet.ARP_TYPE:
+            arp_packet = packet.payload
+            if arp_packet.opcode == arp.REQUEST:
+                self.handle_arp_request(event, arp_packet)
+
+            elif arp_packet.opcode == arp.REPLY:
+                log.info("Received ARP reply from %s", arp_packet.protosrc)
+
+            else:
+                log.warning("Received unknown ARP opcode: %s", arp_packet.opcode)
+
+    def handle_arp_request(self, event, arp_packet):
+        requested_ip = arp_packet.protodst
+        requesting_ip = arp_packet.protosrc
+        requesting_mac = arp_packet.hwsrc
+
+        # Store the requesting MAC address
+        self.mac_map[requesting_ip] = requesting_mac
+
+        if requested_ip == self.vip:
+            if requesting_ip not in self.next_server:
+                self.next_server[requesting_ip] = self.servers[0]
+                self.servers.rotate(-1)
+
+            target_ip = self.next_server[requesting_ip]
+            target_mac = SERVER_MACS.get(str(target_ip))
+
+            if not target_mac:
+                log.info("MAC for %s not known yet, waiting.", target_ip)
+                return
+
+            self.send_arp_reply(event, target_ip, requesting_ip, requesting_mac)
+
+    SERVER_MACS = {
+        "10.0.0.5": EthAddr("00:00:00:00:00:05"),
+        "10.0.0.6": EthAddr("00:00:00:00:00:06")
+    }
+
+    def send_arp_reply(self, event, target_ip, requesting_ip, requesting_mac):
+        target_mac = self.SERVER_MACS.get(str(target_ip))  # Fetch correct MAC address
         
-        in_port = event.port
-        ip_packet = packet.find("ipv4")
-        arp_packet = packet.find("arp")
+        if not target_mac:
+            log.warning("No MAC address found for %s", target_ip)
+            return
 
-        if arp_packet and arp_packet.protodst == self.vip:
-            log.debug("Handling ARP request for VIP: %s", self.vip)
-            self.handle_arp_request(event, arp_packet, in_port)
+        arp_reply = arp()
+        arp_reply.hwsrc = target_mac
+        arp_reply.hwdst = requesting_mac
+        arp_reply.opcode = arp.REPLY
+        arp_reply.protosrc = target_ip
+        arp_reply.protodst = requesting_ip
 
-    def handle_arp_request(self, event, arp_packet, in_port):
-        client_ip = arp_packet.protosrc
-        if client_ip not in self.next_server:
-            self.next_server[client_ip] = self.servers[0]  # Assign next server
-            self.servers.rotate(-1)  # Rotate to next server
-        
-        target_ip = self.next_server[client_ip]
-        if target_ip in self.mac_map:
-            target_mac = self.mac_map[target_ip]
-        else:
-            return  # If MAC address is unknown, we wait
-        
-        arp_reply = of.ofp_packet_out()
-        arp_reply.actions.append(of.ofp_action_output(port=in_port))
-        arp_reply.data = event.data
-        event.connection.send(arp_reply)
-        log.info("Responded to ARP request: %s -> %s (%s)", client_ip, target_ip, target_mac)
+        ether = ethernet()
+        ether.type = ethernet.ARP_TYPE
+        ether.dst = requesting_mac
+        ether.src = target_mac
+        ether.payload = arp_reply
 
-        # Install flow to forward to the correct server
-        self.install_flow(event, in_port, target_ip, target_mac)
+        msg = of.ofp_packet_out()
+        msg.data = ether.pack()
+        msg.actions.append(of.ofp_action_output(port=event.port))
+        event.connection.send(msg)
 
-    def install_flow(self, event, in_port, target_ip, target_mac):
-        # Create a flow mod to forward packets to the target MAC address
-        flow_mod = of.ofp_flow_mod()
-        flow_mod.match = of.ofp_match(in_port=in_port, dl_type=0x0800, nw_dst=self.vip)
-        flow_mod.actions.append(of.ofp_action_dl_addr.set_dst(target_mac))
-        flow_mod.actions.append(of.ofp_action_output(port=in_port))  # Send to the correct port
-        
-        # Send flow mod to switch
-        event.connection.send(flow_mod)
-        log.debug("Flow installed for %s -> %s via MAC %s", self.vip, target_ip, target_mac)
+        log.info("Sent ARP reply: %s -> %s (%s)", target_ip, requesting_ip, target_mac)
 
-    def _handle_ConnectionUp(self, event):
-        #log.info("Switch connected: %s", event.connection)
-        event.connection.addListeners(self)
 
-# Start the controller
 def launch():
     core.registerNew(SimpleLoadBalancer)
