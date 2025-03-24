@@ -59,7 +59,7 @@ class SimpleLoadBalancer(object):
         log.debug("Flow installed for %s -> %s via MAC %s", self.vip, target_ip, target_mac)
 
     def _handle_ConnectionUp(self, event):
-        log.info("Switch connected: %s", event.connection)
+        #log.info("Switch connected: %s", event.connection)
         event.connection.addListeners(self)
 
 # Start the controller
