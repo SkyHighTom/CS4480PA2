@@ -27,6 +27,7 @@ def next_server():
     global current_server
     server = SERVERS[current_server]
     current_server = (current_server + 1) % len(SERVERS)
+    log.debug(f"Next server: {server}")
     return server  # Returns (IP, port)
 
 def send_arp_reply(mac, event, target_ip):
@@ -63,7 +64,7 @@ def install_openflow_rules(client_port, server_ip, server_port, client_ip, event
             nw_dst=VIRTUAL_IP
         )
         actions = [
-            of.ofp_action_nw_dst(server_ip),
+            of.ofp_action_nw_addr.set_dst(server_ip),  # Correct method to set destination IP
             of.ofp_action_output(port=server_port)
         ]
         event.connection.send(of.ofp_flow_mod(match=match, actions=actions))
@@ -77,7 +78,7 @@ def install_openflow_rules(client_port, server_ip, server_port, client_ip, event
             nw_dst=client_ip
         )
         actions = [
-            of.ofp_action_nw_src(VIRTUAL_IP),
+            of.ofp_action_nw_addr.set_src(VIRTUAL_IP),  # Correct method to set source IP
             of.ofp_action_output(port=client_port)
         ]
         event.connection.send(of.ofp_flow_mod(match=match, actions=actions))
@@ -119,9 +120,4 @@ def handle_packet_in(event):
             send_arp_reply(client_mac, event, target_ip)
         else:
             log.error(f"Failed to convert IP {target_ip} to MAC, skipping ARP reply.")
-    else:
-        log.debug(f"ARP request not for virtual IP or known clients: {target_ip}")
-
-def launch():
-    core.openflow.addListenerByName("PacketIn", handle_packet_in)
-    log.info("POX controller started and listening for packets.")
+    else
