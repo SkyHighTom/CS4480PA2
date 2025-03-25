@@ -120,4 +120,9 @@ def handle_packet_in(event):
             send_arp_reply(client_mac, event, target_ip)
         else:
             log.error(f"Failed to convert IP {target_ip} to MAC, skipping ARP reply.")
-    else
+    else:
+        log.debug(f"ARP request not for virtual IP or known clients: {target_ip}")
+
+def launch():
+    core.openflow.addListenerByName("PacketIn", handle_packet_in)
+    log.info("POX controller started and listening for packets.")
