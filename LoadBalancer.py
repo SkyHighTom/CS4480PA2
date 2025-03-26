@@ -21,7 +21,7 @@ getIPFromMac = {EthAddr("00:00:00:00:00:01") : IPAddr("10.0.0.1"),
                 EthAddr("00:00:00:00:00:04") : IPAddr("10.0.0.4"),
                 EthAddr("00:00:00:00:00:05") : IPAddr("10.0.0.5"),
                 EthAddr("00:00:00:00:00:06") : IPAddr("10.0.0.6")}
-client_ips = [IPAddr("10.0.0.{i}") for i in range(1,5)]
+client_ips = [IPAddr(f"10.0.0.{i}") for i in range(1,5)]
 server_ips = [IPAddr("10.0.0.5"), IPAddr("10.0.0.6")]
 current_server = 0
 round_robin = {IPAddr("10.0.0.5") : IPAddr("10.0.0.5"),
@@ -44,7 +44,7 @@ def install_flow_rule(event, port1, port2):
     msg2.actions.append(of.ofp_action_output(port=port1))
     event.connection.send(msg2)
 
-def _handle_PacketIn(self, event):
+def _handle_PacketIn(event):
     global current_server
     packet = event.parsed
     if packet.type == packet.ARP_TYPE:
@@ -62,12 +62,12 @@ def _handle_PacketIn(self, event):
             arp_reply.protosrc = getIPFromMac[mac]
             arp_reply.protodst = arp_packet.protosrc
             ether = pkt.ethernet()
-            ether.type = pkt.ethernet.ARP_TYPE
+            ether.type = pkt.ethernet.ARP_TYPE  
             ether.dst = packet.src
             ether.src = mac
             ether.payload = arp_reply
             #send this packet to the switch
-            self.send_packet(event, ether)
+            event.connection.send(ether)
 
             client_port = int(str(arp_packet.protosrc)[-1])
             server_port = int(str(dest)[-1])
@@ -98,7 +98,7 @@ def _handle_PacketIn(self, event):
         ether.payload = ip_packet
 
         # Step 4: Forward the packet
-        self.send_packet(event, ether)
+        event.connect.send(ether)
 
 
 @poxutil.eval_args
