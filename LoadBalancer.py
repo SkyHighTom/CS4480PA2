@@ -33,7 +33,7 @@ def _go_up (event):
 
 def install_flow_rule(event, port1, port2):
     # Flow: Packets from port1 go to port2
-    log.info("port1: " + str(port1) + ", port2: " + str(port2))
+    log("port1: " + port1 + ", port2: " + port2)
     msg1 = of.ofp_flow_mod()
     msg1.match.in_port = port1
     msg1.actions.append(of.ofp_action_output(port=port2))
@@ -46,9 +46,9 @@ def install_flow_rule(event, port1, port2):
     event.connection.send(msg2)
 
 def _handle_PacketIn(event):
+    log.info("packetin")
     global current_server
     packet = event.parsed
-    log.info("packetin")
     if packet.type == packet.ARP_TYPE:
         arp_packet = packet.payload
         if arp_packet.protodst not in round_robin:
@@ -68,19 +68,16 @@ def _handle_PacketIn(event):
             ether.dst = packet.src
             ether.src = mac
             ether.payload = arp_reply
-                  
-            client_port = int(str(arp_packet.protosrc)[-1])
-            server_port = int(str(dest)[-1])
-            install_flow_rule(event, client_port, server_port)
             #send this packet to the switch
             packet_out = of.ofp_packet_out()
             packet_out.data = ether.pack()  # Pack Ethernet frame
             packet_out.actions.append(of.ofp_action_output(port=event.port))  # Send it back to the source port
             event.connection.send(packet_out)
-                  
-        elif packet.payload.opcode == pkt.arp.REPLY:
-            log.info("arp reply")
-            #arp reply
+
+            client_port = int(str(arp_packet.protosrc)[-1])
+            server_port = int(str(dest)[-1])
+            install_flow_rule(event, client_port, server_port)
+
     elif packet.type == packet.IP_TYPE:
         ip_packet = packet.payload
         if ip_packet.dstip not in round_robin:
