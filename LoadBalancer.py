@@ -69,7 +69,7 @@ def _handle_PacketIn(event):
             ether.src = mac
             ether.payload = arp_reply
             #send this packet to the switch
-            event.connection.send(ether)
+            #event.connection.send(ether)
 
             client_port = int(str(arp_packet.protosrc)[-1])
             server_port = int(str(dest)[-1])
@@ -100,7 +100,7 @@ def _handle_PacketIn(event):
         ether.payload = ip_packet
 
         # Step 4: Forward the packet
-        event.connect.send(ether)
+        #event.connect.send(ether)
 
 
 @poxutil.eval_args
