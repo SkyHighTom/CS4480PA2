@@ -31,7 +31,7 @@ round_robin = {IPAddr("10.0.0.5") : IPAddr("10.0.0.5"),
 def _go_up (event):
   log.info("Application up")
 
-def install_flow_rule(event, port1, port2, is_server_to_client=False):
+def install_flow_rule(event, port1, port2):
     """
     Adds bidirectional flow rules between two ports.
     If is_server_to_client is True, match on nw_src as well.
@@ -52,8 +52,7 @@ def install_flow_rule(event, port1, port2, is_server_to_client=False):
     msg2.match.in_port = port2
     msg2.match.dl_type = pkt.ethernet.IP_TYPE  # Match only IP packets
     msg2.match.nw_dst = getIPFromMac[getMac[IPAddr(f"10.0.0.{port1}")]]  # Match on destination IP
-    if is_server_to_client:
-        msg2.match.nw_src = getIPFromMac[getMac[IPAddr(f"10.0.0.{port2}")]]  # Match on source IP
+    msg2.match.nw_src = getIPFromMac[getMac[IPAddr(f"10.0.0.{port2}")]]  # Match on source IP
     msg2.actions.append(of.ofp_action_dl_addr.set_src(getMac[IPAddr(f"10.0.0.{port2}")]))  # Set MAC
     msg2.actions.append(of.ofp_action_output(port=port1))  # Output action AFTER address change
     event.connection.send(msg2)
@@ -102,12 +101,8 @@ def _handle_PacketIn(event):
 
         client_port = int(str(ip_packet.srcip)[-1])
         server_port = int(str(backend_ip)[-1])
-        # Client-to-server flow rule
+        
         install_flow_rule(event, client_port, server_port)
-
-        # Server-to-client flow rule
-        install_flow_rule(event, server_port, client_port, is_server_to_client=True)
-
         # Step 2: Modify IP packet destination
         ip_packet.dstip = backend_ip
 
