@@ -31,7 +31,7 @@ round_robin = {IPAddr("10.0.0.5") : IPAddr("10.0.0.5"),
 def _go_up (event):
   log.info("Application up")
 
-def install_flow_rule(event, port1, port2):
+def install_flow_rule(type, port1, port2):
     """
     Adds bidirectional flow rules between two ports.
     If is_server_to_client is True, match on nw_src as well.
@@ -41,20 +41,19 @@ def install_flow_rule(event, port1, port2):
     # Flow rule: Client to server
     msg1 = of.ofp_flow_mod()
     msg1.match.in_port = port1
-    msg1.match.dl_type = pkt.ethernet.IP_TYPE  # Match only IP packets
-    msg1.match.nw_dst = getIPFromMac[getMac[IPAddr(f"10.0.0.{port2}")]]  # Match on destination IP
+    msg1.match.dl_type = type
+    msg1.match.nw_dst = IPAddr(f"10.0.0.{port2}")  # Match on destination IP
     msg1.actions.append(of.ofp_action_dl_addr.set_dst(getMac[IPAddr(f"10.0.0.{port2}")]))  # Set MAC
     msg1.actions.append(of.ofp_action_output(port=port2))  # Output action AFTER address change
 
     # Flow rule: Server to client
     msg2 = of.ofp_flow_mod()
     msg2.match.in_port = port2
-    msg2.match.dl_type = pkt.ethernet.IP_TYPE  # Match only IP packets
+    msg2.match.dl_type = type
     msg2.match.nw_dst = getIPFromMac[getMac[IPAddr(f"10.0.0.{port1}")]]  # Match on destination IP
     msg2.match.nw_src = getIPFromMac[getMac[IPAddr(f"10.0.0.{port2}")]]  # Match on source IP
     msg2.actions.append(of.ofp_action_dl_addr.set_src(getMac[IPAddr(f"10.0.0.{port2}")]))  # Set MAC
     msg2.actions.append(of.ofp_action_output(port=port1))  # Output action AFTER address change
-
 
 def _handle_PacketIn(event):
     global current_server
@@ -87,7 +86,8 @@ def _handle_PacketIn(event):
 
             client_port = int(str(arp_packet.protosrc)[-1])
             server_port = int(str(dest)[-1])
-            install_flow_rule(event, client_port, server_port)
+            log.info("arp")
+            install_flow_rule(pkt.ethernet.ARP_TYPE, client_port, server_port)
 
     elif packet.type == packet.IP_TYPE:
         ip_packet = packet.payload
@@ -99,8 +99,8 @@ def _handle_PacketIn(event):
 
         client_port = int(str(ip_packet.srcip)[-1])
         server_port = int(str(backend_ip)[-1])
-
-        install_flow_rule(event, client_port, server_port)
+        log.info("ip")
+        install_flow_rule(pkt.ethernet.IP_TYPEy, client_port, server_port)
         # Step 2: Modify IP packet destination
         ip_packet.dstip = backend_ip
 
