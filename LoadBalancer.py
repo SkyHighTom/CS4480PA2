@@ -31,98 +31,78 @@ round_robin = {IPAddr("10.0.0.5") : IPAddr("10.0.0.5"),
 def _go_up (event):
   log.info("Application up")
 
-def install_flow_rule(event, port1, port2, is_server_to_client=False):
+def install_flow_rule(event, port1, port2, client_ip, backend_ip, virtual_ip):
     """
-    Adds bidirectional flow rules between two ports.
-    If is_server_to_client is True, match on nw_src as well.
+    Adds bidirectional flow rules:
+    - client -> virtual_ip -> backend
+    - backend -> client (src_ip rewritten to virtual_ip)
     """
     log.info(f"Installing flow rule: {port1} <-> {port2}")
 
-    # Flow rule: Client to server
+    # Flow rule: Client to Backend
     msg1 = of.ofp_flow_mod()
     msg1.match.in_port = port1
     msg1.match.dl_type = pkt.ethernet.IP_TYPE  # Match only IP packets
-    msg1.match.nw_dst = getIPFromMac[getMac[IPAddr(f"10.0.0.{port2}")]]  # Match on destination IP
-    msg1.actions.append(of.ofp_action_dl_addr.set_dst(getMac[IPAddr(f"10.0.0.{port2}")]))  # Set MAC
-    msg1.actions.append(of.ofp_action_output(port=port2))  # Output action AFTER address change
+    msg1.match.nw_dst = virtual_ip  # Match the virtual service IP (10.0.0.10)
+    msg1.actions.append(of.ofp_action_nw_addr.set_dst(backend_ip))  # Rewrite dst IP
+    msg1.actions.append(of.ofp_action_dl_addr.set_dst(getMac[backend_ip]))  # Set MAC
+    msg1.actions.append(of.ofp_action_output(port=port2))  # Forward to backend
     event.connection.send(msg1)
 
-    # Flow rule: Server to client
+    # Flow rule: Backend to Client (Rewrite src IP)
     msg2 = of.ofp_flow_mod()
     msg2.match.in_port = port2
     msg2.match.dl_type = pkt.ethernet.IP_TYPE  # Match only IP packets
-    msg2.match.nw_dst = getIPFromMac[getMac[IPAddr(f"10.0.0.{port1}")]]  # Match on destination IP
-    if is_server_to_client:
-        msg2.match.nw_src = getIPFromMac[getMac[IPAddr(f"10.0.0.{port2}")]]  # Match on source IP
-    msg2.actions.append(of.ofp_action_dl_addr.set_src(getMac[IPAddr(f"10.0.0.{port2}")]))  # Set MAC
-    msg2.actions.append(of.ofp_action_output(port=port1))  # Output action AFTER address change
+    msg2.match.nw_src = backend_ip  # Match backend server IP
+    msg2.match.nw_dst = client_ip  # Match original client IP
+    msg2.actions.append(of.ofp_action_nw_addr.set_src(virtual_ip))  # Rewrite src IP to 10.0.0.10
+    msg2.actions.append(of.ofp_action_output(port=port1))  # Send back to client
     event.connection.send(msg2)
-
 
 def _handle_PacketIn(event):
     global current_server
     packet = event.parsed
-    log.info("packetin")
-    if packet.type == packet.ARP_TYPE:
+    log.info("PacketIn event received")
+
+    if packet.type == pkt.ethernet.ARP_TYPE:
         arp_packet = packet.payload
-        if arp_packet.protodst not in round_robin:
-            round_robin[arp_packet.protodst] = server_ips[current_server%len(server_ips)]
+        if arp_packet.protodst == IPAddr("10.0.0.10"):  # Virtual service IP
+            backend_ip = server_ips[current_server % len(server_ips)]
             current_server += 1
-        dest = round_robin[arp_packet.protodst]
-        if packet.payload.opcode == pkt.arp.REQUEST:
+
+            log.info(f"Handling ARP request for virtual IP 10.0.0.10, mapping to {backend_ip}")
+
+            # Send ARP reply pretending to be 10.0.0.10
             arp_reply = pkt.arp()
-            mac = getMac[dest]
-            arp_reply.hwsrc = mac
+            arp_reply.hwsrc = getMac[backend_ip]  # Use backend MAC
             arp_reply.hwdst = packet.src
             arp_reply.opcode = pkt.arp.REPLY
-            arp_reply.protosrc = getIPFromMac[mac]
+            arp_reply.protosrc = IPAddr("10.0.0.10")  # Set source as virtual IP
             arp_reply.protodst = arp_packet.protosrc
+
             ether = pkt.ethernet()
             ether.type = pkt.ethernet.ARP_TYPE  
             ether.dst = packet.src
-            ether.src = mac
+            ether.src = getMac[backend_ip]  # Use backend MAC
             ether.payload = arp_reply
-            #send this packet to the switch
+
             packet_out = of.ofp_packet_out()
-            packet_out.data = ether.pack()  # Pack Ethernet frame
-            packet_out.actions.append(of.ofp_action_output(port=event.port))  # Send it back to the source port
+            packet_out.data = ether.pack()
+            packet_out.actions.append(of.ofp_action_output(port=event.port))
             event.connection.send(packet_out)
 
-            client_port = int(str(arp_packet.protosrc)[-1])
-            server_port = int(str(dest)[-1])
-            install_flow_rule(event, client_port, server_port)
-
-    elif packet.type == packet.IP_TYPE:
+    elif packet.type == pkt.ethernet.IP_TYPE:
         ip_packet = packet.payload
-        if ip_packet.dstip not in round_robin:
-            round_robin[ip_packet.dstip] = server_ips[current_server % len(server_ips)]
+        if ip_packet.dstip == IPAddr("10.0.0.10"):
+            backend_ip = server_ips[current_server % len(server_ips)]
             current_server += 1
+            client_ip = ip_packet.srcip
 
-        backend_ip = round_robin[ip_packet.dstip]
+            client_port = int(str(client_ip)[-1])
+            backend_port = int(str(backend_ip)[-1])
 
-        client_port = int(str(ip_packet.srcip)[-1])
-        server_port = int(str(backend_ip)[-1])
-        # Client-to-server flow rule
-        install_flow_rule(event, client_port, server_port)
+            install_flow_rule(event, client_port, backend_port, client_ip, backend_ip, IPAddr("10.0.0.10"))
 
-        # Server-to-client flow rule
-        install_flow_rule(event, server_port, client_port, is_server_to_client=True)
-
-        # Step 2: Modify IP packet destination
-        ip_packet.dstip = backend_ip
-
-        # Step 3: Modify Ethernet Frame
-        ether = pkt.ethernet()
-        ether.type = pkt.ethernet.IP_TYPE
-        ether.src = getMac[ip_packet.srcip]  # Source MAC remains unchanged
-        ether.dst = getMac[backend_ip]  # Destination MAC for backend server
-        ether.payload = ip_packet
-
-        # Step 4: Forward the packet
-        packet_out = of.ofp_packet_out()
-        packet_out.data = ether.pack()  # Pack Ethernet frame
-        packet_out.actions.append(of.ofp_action_output(port=event.port))  # Send it back to the source port
-        event.connection.send(packet_out)
 
 
 @poxutil.eval_args
