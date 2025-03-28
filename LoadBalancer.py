@@ -30,14 +30,17 @@ def install_flow_rule(packet_type, client_port, server_port, dest_ip):
     
     # Client to Server
     msg1 = of.ofp_flow_mod()
-    log.info("In Port: " + str(msg1.in_port) + " " + str(client_port))
     msg1.match.in_port = client_port
-    log.info("Packet Type: " + str(msg1.dl_type) + " " + str(packet_type))
     msg1.match.dl_type = packet_type
-    log.info("Dest: " + str(msg1.nw_dst) + " " + str(dest_ip))
     msg1.match.nw_dst = dest_ip
+
+    log.info(f"In Port: {msg1.match.in_port} Expected: {client_port}")
+    log.info(f"Packet Type: {msg1.match.dl_type} Expected: {packet_type}")
+    log.info(f"Dest: {msg1.match.nw_dst} Expected: {dest_ip}")
+
     msg1.actions.append(of.ofp_action_dl_addr.set_dst(getMac[IPAddr(f"10.0.0.{server_port}")]))
     msg1.actions.append(of.ofp_action_output(port=server_port))
+
     
     # Server to Client
     msg2 = of.ofp_flow_mod()
