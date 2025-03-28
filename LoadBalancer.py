@@ -95,8 +95,8 @@ def _handle_PacketIn(event):
             client_port = int(str(arp_packet.protosrc)[-1])
             server_port = int(str(dest)[-1])
             install_flow_rule(pkt.ethernet.ARP_TYPE, client_port, server_port, actual_ip, connection)
-            if actual_ip == IPAddr("10.0.0.10"):
-                log.info("AAAAA")
+            if actual_ip not in server_ips:
+                install_flow_rule(pkt.ethernet.IP_TYPE, client_port, server_port, actual_ip, connection)
 
         elif arp_packet.opcode == pkt.arp.REPLY:
             log.info("REPLY")
