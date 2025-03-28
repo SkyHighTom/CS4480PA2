@@ -18,20 +18,24 @@ getIPFromMac = {v: k for k, v in getMac.items()}
 client_ips = [IPAddr(f"10.0.0.{i}") for i in range(1, 5)]
 server_ips = [IPAddr("10.0.0.5"), IPAddr("10.0.0.6")]
 current_server = 0
-round_robin = {}
+round_robin = {IPAddr("10.0.0.5"): IPAddr("10.0.0.5"),
+               IPAddr("10.0.0.6"): IPAddr("10.0.0.6")}
 
 def _go_up(event):
     log.info("Application up")
 
-def install_flow_rule(packet_type, client_port, server_port):
+def install_flow_rule(packet_type, client_port, server_port, dest_ip):
     """Installs bidirectional flow rules between a client and server."""
     log.info(f"Installing flow rule: {client_port} <-> {server_port}")
     
     # Client to Server
     msg1 = of.ofp_flow_mod()
+    log.info("In Port: " + str(msg1.in_port) + " " + str(client_port))
     msg1.match.in_port = client_port
+    log.info("Packet Type: " + str(msg1.dl_type) + " " + str(packet_type))
     msg1.match.dl_type = packet_type
-    msg1.match.nw_dst = IPAddr(f"10.0.0.{server_port}")
+    log.info("Dest: " + str(msg1.nw_dst) + " " + str(dest_ip))
+    msg1.match.nw_dst = dest_ip
     msg1.actions.append(of.ofp_action_dl_addr.set_dst(getMac[IPAddr(f"10.0.0.{server_port}")]))
     msg1.actions.append(of.ofp_action_output(port=server_port))
     
@@ -51,6 +55,8 @@ def _handle_PacketIn(event):
     
     if packet.type == packet.ARP_TYPE:
         arp_packet = packet.payload
+        actual_ip = arp_packet.protodst
+        log.info("ARP " + str(actual_ip))
         if arp_packet.protodst not in round_robin:
             round_robin[arp_packet.protodst] = server_ips[current_server % len(server_ips)]
             current_server += 1
@@ -77,10 +83,12 @@ def _handle_PacketIn(event):
             
             client_port = int(str(arp_packet.protosrc)[-1])
             server_port = int(str(dest)[-1])
-            install_flow_rule(pkt.ethernet.ARP_TYPE, client_port, server_port)
+            install_flow_rule(pkt.ethernet.ARP_TYPE, client_port, server_port, actual_ip)
     
     elif packet.type == packet.IP_TYPE:
         ip_packet = packet.payload
+        actual_ip = ip_packet.dstip
+        log.info("IP " + str(actual_ip))
         if ip_packet.dstip not in round_robin:
             round_robin[ip_packet.dstip] = server_ips[current_server % len(server_ips)]
             current_server += 1
@@ -89,7 +97,7 @@ def _handle_PacketIn(event):
         client_port = int(str(ip_packet.srcip)[-1])
         server_port = int(str(backend_ip)[-1])
         
-        install_flow_rule(pkt.ethernet.IP_TYPE, client_port, server_port)
+        install_flow_rule(pkt.ethernet.IP_TYPE, client_port, server_port, actual_ip)
         
         # Modify the packet for load balancing
         ip_packet.dstip = backend_ip
