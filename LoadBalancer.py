@@ -98,8 +98,8 @@ def _handle_PacketIn(event):
             if actual_ip == IPAddr("10.0.0.10"):
                 log.info("AAAAA")
 
-    elif arp_packet.opcode == pkt.arp.REPLY:
-        log.info("REPLY")
+        elif arp_packet.opcode == pkt.arp.REPLY:
+            log.info("REPLY")
     
     elif packet.type == packet.IP_TYPE:
         ip_packet = packet.payload
