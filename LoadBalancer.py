@@ -36,7 +36,7 @@ def install_flow_rule(packet_type, client_port, server_port, dest_ip, connection
     msg1.actions.append(of.ofp_action_dl_addr.set_src(getMac[IPAddr(f"10.0.0.{client_port}")]))
     msg1.actions.append(of.ofp_action_nw_addr.set_src(IPAddr(f"10.0.0.{client_port}")))
     msg1.actions.append(of.ofp_action_dl_addr.set_dst(getMac[IPAddr(f"10.0.0.{server_port}")]))
-    msg1.actions.append(of.ofp_action_nw_addr.set_dst(dest_ip))
+    msg1.actions.append(of.ofp_action_nw_addr.set_dst(IPAddr(f"10.0.0.{server_port}")))
     msg1.actions.append(of.ofp_action_output(port=server_port))
 
     connection.send(msg1)  # <-- Send the flow mod message to the switch!
@@ -46,7 +46,7 @@ def install_flow_rule(packet_type, client_port, server_port, dest_ip, connection
     msg2.match.in_port = server_port
     msg2.match.dl_type = packet_type
     msg2.match.nw_dst = IPAddr(f"10.0.0.{client_port}")
-    msg2.match.nw_src = dest_ip
+    msg2.match.nw_src = IPAddr(f"10.0.0.{server_port}")
     msg2.actions.append(of.ofp_action_dl_addr.set_src(getMac[IPAddr(f"10.0.0.{server_port}")]))
     msg2.actions.append(of.ofp_action_nw_addr.set_src(dest_ip))
     msg2.actions.append(of.ofp_action_dl_addr.set_dst(getMac[IPAddr(f"10.0.0.{client_port}")]))
