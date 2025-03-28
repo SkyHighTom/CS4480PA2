@@ -87,14 +87,15 @@ def _handle_PacketIn(event):
             ether.src = mac
             ether.payload = arp_reply
             
-            packet_out = of.ofp_packet_out()
-            packet_out.data = ether.pack()
-            packet_out.actions.append(of.ofp_action_output(port=event.port))
-            event.connection.send(packet_out)
-            
             client_port = int(str(arp_packet.protosrc)[-1])
             server_port = int(str(dest)[-1])
             install_flow_rule(pkt.ethernet.ARP_TYPE, client_port, server_port, actual_ip, connection)
+            
+            packet_out = of.ofp_packet_out()
+            packet_out.data = ether.pack()
+            packet_out.actions.append(of.ofp_action_output(port=event.port))
+            connection.send(packet_out)
+
     elif arp_packet.opcode == pkt.arp.REPLY:
         log.info("REPLY")
     
@@ -110,6 +111,8 @@ def _handle_PacketIn(event):
         client_port = int(str(ip_packet.srcip)[-1])
         server_port = int(str(backend_ip)[-1])
         
+        install_flow_rule(pkt.ethernet.IP_TYPE, client_port, server_port, actual_ip, connection)
+        
         # Modify the packet for load balancing
         ip_packet.dstip = backend_ip
         ether = pkt.ethernet()
@@ -121,9 +124,7 @@ def _handle_PacketIn(event):
         packet_out = of.ofp_packet_out()
         packet_out.data = ether.pack()
         packet_out.actions.append(of.ofp_action_output(port=event.port))
-        event.connection.send(packet_out)
-        
-        install_flow_rule(pkt.ethernet.IP_TYPE, client_port, server_port, actual_ip, connection)
+        connection.send(packet_out)
 
 @poxutil.eval_args
 def launch():
