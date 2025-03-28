@@ -59,8 +59,6 @@ def _handle_PacketIn(event):
     global current_server
     packet = event.parsed
     connection = event.connection  # Get the switch connection
-    if getIPFromMac[packet.src] in server_ips:
-        return
     if not packet.parsed:
         log.warning("Ignoring incomplete packet")
         return
