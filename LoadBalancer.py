@@ -58,7 +58,6 @@ def install_flow_rule(packet_type, client_port, server_port, dest_ip, connection
 def _handle_PacketIn(event):
     global current_server
     packet = event.parsed
-    connection = event.connection  # Get the switch connection
     if not packet.parsed:
         log.warning("Ignoring incomplete packet")
         return
@@ -74,8 +73,8 @@ def _handle_PacketIn(event):
         dest = round_robin[arp_packet.protodst]
         
         if arp_packet.opcode == pkt.arp.REQUEST:
-            mac = getMac[dest]
             arp_reply = pkt.arp()
+            mac = getMac[dest]
             arp_reply.hwsrc = mac
             arp_reply.hwdst = packet.src
             arp_reply.opcode = pkt.arp.REPLY
@@ -87,14 +86,14 @@ def _handle_PacketIn(event):
             ether.src = mac
             ether.payload = arp_reply
 
-            client_port = int(str(arp_packet.protosrc)[-1])
-            server_port = int(str(dest)[-1])
-            install_flow_rule(pkt.ethernet.ARP_TYPE, client_port, server_port, actual_ip, connection)
-            
             packet_out = of.ofp_packet_out()
             packet_out.data = ether.pack()
             packet_out.actions.append(of.ofp_action_output(port=event.port))
-            connection.send(packet_out)
+            event.connection.send(packet_out)
+
+            client_port = int(str(arp_packet.protosrc)[-1])
+            server_port = int(str(dest)[-1])
+            install_flow_rule(pkt.ethernet.ARP_TYPE, client_port, server_port, actual_ip, event.connection)
 
         elif arp_packet.opcode == pkt.arp.REPLY:
             log.info("REPLY")
@@ -111,7 +110,7 @@ def _handle_PacketIn(event):
         client_port = int(str(ip_packet.srcip)[-1])
         server_port = int(str(backend_ip)[-1])
         
-        install_flow_rule(pkt.ethernet.IP_TYPE, client_port, server_port, actual_ip, connection)
+        install_flow_rule(pkt.ethernet.IP_TYPE, client_port, server_port, actual_ip, event.connection)
         
         # Modify the packet for load balancing
         ip_packet.dstip = backend_ip
@@ -124,7 +123,7 @@ def _handle_PacketIn(event):
         packet_out = of.ofp_packet_out()
         packet_out.data = ether.pack()
         packet_out.actions.append(of.ofp_action_output(port=event.port))
-        connection.send(packet_out)
+        event.connection.send(packet_out)
 
 @poxutil.eval_args
 def launch():
