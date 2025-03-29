@@ -29,6 +29,7 @@ class LoadBalancerController(object):
         return server_ip
 
     def _handle_PacketIn(self, event):
+        log.info("PacketIn")
         packet = event.parsed
         if not packet:
             return
