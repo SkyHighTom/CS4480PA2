@@ -40,7 +40,7 @@ class LoadBalancerController(object):
             log.info("ARP")
             arp_packet = packet.payload
             if arp_packet.opcode == pkt.arp.REQUEST:
-                if arp_packet.protodst == self.virtual_ip or arp_packet.protodst in self.server_ips:
+                if arp_packet.protodst == self.virtual_ip:
                     client_ip = arp_packet.protosrc
                     if client_ip in self.round_robin:
                         server_ip, server_mac = self.round_robin[client_ip]
@@ -52,10 +52,20 @@ class LoadBalancerController(object):
                     self._send_arp(event, arp_packet, server_mac, inport)
                     self._install_virt_flow(client_ip, packet.src, server_ip, server_mac, inport)
                 else:
-                    if arp_packet.protodst in self.arp_tbl:
-                        dst_mac, _ = self.arp_tbl[arp_packet.protodst]
-                        self._send_arp(event, arp_packet, dst_mac, inport,
-                                             override_ip=arp_packet.protodst)
+                    if arp_packet.protodst in self.server_ips:
+                        client_ip = arp_packet.protosrc
+                        server_ip = arp_packet.protodst
+                        server_mac = self.getMac[server_ip]
+                        if client_ip not in self.round_robin:
+                            self.round_robin[client_ip] = server_ip
+                            log.info("IP direct client assigned server")
+                            self._install_virt_flow(client_ip, packet.src, server_ip, server_mac, inport)
+                        self._install_flow(client_ip, packet.src, server_ip, server_mac, inport)
+                        server_port = int(str(server_ip)[-1])
+                        msg = of.ofp_packet_out()
+                        msg.data = event.ofp.data
+                        msg.actions.append(of.ofp_action_output(port=server_port))
+                        self.connection.send(msg)
                     else:
                         self._flood(event)
 
