@@ -88,6 +88,7 @@ class LoadBalancerController(object):
                 if client_ip not in self.round_robin:
                     self.round_robin[client_ip] = server_ip
                     log.info("IP direct client assigned server")
+                    self._install_virt_flow(client_ip, packet.src, server_ip, server_mac, inport)
                 self._install_flow(client_ip, packet.src, server_ip, server_mac, inport)
                 server_port = int(str(server_ip)[-1])
                 msg = of.ofp_packet_out()
