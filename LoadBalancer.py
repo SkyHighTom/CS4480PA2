@@ -30,7 +30,7 @@ class LoadBalancerController(object):
         src_port = event.port
         self._refresh_address_table(packet, src_port)
 
-        if packet.type == pkt.ARP_TYPE:
+        if packet.type == packet.ARP_TYPE:
             arp_payload = packet.payload
             if arp_payload.opcode == pkt.arp.REQUEST:
                 if arp_payload.protodst == self.virtual_gateway:
@@ -53,7 +53,7 @@ class LoadBalancerController(object):
                         self._broadcast(event)
             return
 
-        elif packet.type == pkt.ethernet.IP_TYPE:
+        elif packet.type == packet.ethernet.IP_TYPE:
             ip_payload = packet.payload
             if ip_payload.dstip == self.virtual_gateway:
                 client_ip = ip_payload.srcip
