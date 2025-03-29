@@ -38,37 +38,27 @@ class LoadBalancerController(object):
 
         if packet.type == packet.ARP_TYPE:
             log.info("ARP")
-            arp_packet = packet.payload
-            if arp_packet.opcode == pkt.arp.REQUEST:
-                if arp_packet.protodst == self.virtual_ip:
-                    client_ip = arp_packet.protosrc
+            arp_pkt = packet.payload
+            if arp_pkt.opcode == pkt.arp.REQUEST:
+                if arp_pkt.protodst == self.virtual_ip:
+                    client_ip = arp_pkt.protosrc
                     if client_ip in self.round_robin:
-                        server_ip, server_mac = self.round_robin[client_ip]
+                        server_ip = self.round_robin[client_ip]
+                        server_mac = self.getMac[server_ip]
                     else:
                         server_ip = self._pick_round_robin()
                         server_mac = self.getMac[server_ip]
                         self.round_robin[client_ip] = server_ip
                         log.info("Assigning client to server")
-                    self._send_arp(event, arp_packet, server_mac, inport)
+                    self._send_arp(event, arp_pkt, server_mac, inport)
                     self._install_virt_flow(client_ip, packet.src, server_ip, server_mac, inport)
                 else:
-                    if arp_packet.protodst in self.server_ips:
-                        client_ip = arp_packet.protosrc
-                        server_ip = arp_packet.protodst
-                        server_mac = self.getMac[server_ip]
-                        if client_ip not in self.round_robin:
-                            self.round_robin[client_ip] = server_ip
-                            log.info("IP direct client assigned server")
-                            self._install_virt_flow(client_ip, packet.src, server_ip, server_mac, inport)
-                        self._install_flow(client_ip, packet.src, server_ip, server_mac, inport)
-                        server_port = int(str(server_ip)[-1])
-                        msg = of.ofp_packet_out()
-                        msg.data = event.ofp.data
-                        msg.actions.append(of.ofp_action_output(port=server_port))
-                        self.connection.send(msg)
+                    if arp_pkt.protodst in self.arp_tbl:
+                        dst_mac, _ = self.arp_tbl[arp_pkt.protodst]
+                        self._send_arp(event, arp_pkt, dst_mac, inport,
+                                             override_ip=arp_pkt.protodst)
                     else:
                         self._flood(event)
-
             return
 
         elif packet.type == packet.IP_TYPE:
@@ -120,12 +110,12 @@ class LoadBalancerController(object):
 
     def _update_arp(self, packet, inport):
         if packet.type == pkt.ethernet.ARP_TYPE:
-            arp_packet = packet.payload
-            if arp_packet.opcode in (pkt.arp.REQUEST, pkt.arp.REPLY):
-                self.arp_tbl[arp_packet.protosrc] = (arp_packet.hwsrc, inport)
+            arp_pkt = packet.payload
+            if arp_pkt.opcode in (pkt.arp.REQUEST, pkt.arp.REPLY):
+                self.arp_tbl[arp_pkt.protosrc] = (arp_pkt.hwsrc, inport)
         elif packet.type == pkt.ethernet.IP_TYPE:
-            ip_packet = packet.payload
-            self.arp_tbl[ip_packet.srcip] = (packet.src, inport)
+            ip_pkt = packet.payload
+            self.arp_tbl[ip_pkt.srcip] = (packet.src, inport)
 
     def _send_arp(self, event, arp_req, reply_mac, outport, override_ip=None):
         arp_reply = pkt.arp()
