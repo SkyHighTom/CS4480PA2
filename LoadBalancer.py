@@ -18,7 +18,7 @@ class LoadBalancerController(object):
         self.server_ips = [IPAddr("10.0.0.5"), IPAddr("10.0.0.6")]
 
         self.current_server = 0
-        self.arp_table = {}
+        self.arp_tbl = {}
         self.round_robin = {}
         connection.addListeners(self)
         log.info("Connected")
@@ -43,16 +43,15 @@ class LoadBalancerController(object):
                     client_ip = arp_pkt.protosrc
                     if client_ip in self.round_robin:
                         server_ip, server_mac = self.round_robin[client_ip]
-                        log.info("Client %s already assigned to server %s", client_ip, server_ip)
                     else:
                         server_ip, server_mac = self._pick_round_robin()
                         self.round_robin[client_ip] = (server_ip, server_mac)
-                        log.info("Assigning client %s to server %s", client_ip, server_ip)
+                        log.info("Assigning client to server")
                     self._send_arp(event, arp_pkt, server_mac, inport)
                     self._install_virt_flow(client_ip, packet.src, server_ip, server_mac, inport)
                 else:
-                    if arp_pkt.protodst in self.arp_table:
-                        dst_mac, _ = self.arp_table[arp_pkt.protodst]
+                    if arp_pkt.protodst in self.arp_tbl:
+                        dst_mac, _ = self.arp_tbl[arp_pkt.protodst]
                         self._send_arp(event, arp_pkt, dst_mac, inport,
                                              override_ip=arp_pkt.protodst)
                     else:
@@ -65,11 +64,11 @@ class LoadBalancerController(object):
                 client_ip = ip_pkt.srcip
                 if client_ip in self.round_robin:
                     server_ip, server_mac = self.round_robin[client_ip]
-                    log.info("Processing IP packet from client %s using assigned server %s", client_ip, server_ip)
+                    log.info("IP from client assigned server")
                 else:
                     server_ip, server_mac = self._pick_round_robin()
                     self.round_robin[client_ip] = (server_ip, server_mac)
-                    log.info("Assigning client %s to server %s (via virtual IP)", client_ip, server_ip)
+                    log.info("IP assigning client server")
                     self._install_virt_flow(client_ip, packet.src, server_ip, server_mac, inport)
 
                 server_port = int(str(server_ip)[-1])
@@ -79,23 +78,23 @@ class LoadBalancerController(object):
                 msg.actions.append(of.ofp_action_dl_addr.set_dst(server_mac))
                 msg.actions.append(of.ofp_action_output(port=server_port))
                 self.connection.send(msg)
-                log.info("Redirected IP packet from client %s (virtual IP) to server %s", client_ip, server_ip)
+                log.info("IP packet redirected")
             elif ip_pkt.dstip in self.server_ips:
                 client_ip = ip_pkt.srcip
                 server_ip = ip_pkt.dstip
                 server_mac = self.getMac[server_ip]
                 if client_ip not in self.round_robin:
                     self.round_robin[client_ip] = (server_ip, server_mac)
-                    log.info("Direct assignment: Client %s assigned to server %s", client_ip, server_ip)
+                    log.info("IP direct client assigned server")
                 self._install_flow(client_ip, packet.src, server_ip, server_mac, inport)
                 server_port = int(str(server_ip)[-1])
                 msg = of.ofp_packet_out()
                 msg.data = event.ofp.data
                 msg.actions.append(of.ofp_action_output(port=server_port))
                 self.connection.send(msg)
-                log.info("Redirected direct IP packet from client %s to server %s", client_ip, server_ip)
+                log.info("IP direct redirect client server")
             else:
-                log.info("Received IP packet not destined for virtual IP or known server; flooding")
+                log.info("IP not virt or server flood")
                 self._flood(event)
             return
 
@@ -106,10 +105,10 @@ class LoadBalancerController(object):
         if packet.type == pkt.ethernet.ARP_TYPE:
             arp_pkt = packet.next
             if arp_pkt.opcode in (pkt.arp.REQUEST, pkt.arp.REPLY):
-                self.arp_table[arp_pkt.protosrc] = (arp_pkt.hwsrc, inport)
+                self.arp_tbl[arp_pkt.protosrc] = (arp_pkt.hwsrc, inport)
         elif packet.type == pkt.ethernet.IP_TYPE:
             ip_pkt = packet.next
-            self.arp_table[ip_pkt.srcip] = (packet.src, inport)
+            self.arp_tbl[ip_pkt.srcip] = (packet.src, inport)
 
     def _send_arp(self, event, arp_req, reply_mac, outport, override_ip=None):
         arp_reply = pkt.arp()
@@ -129,50 +128,50 @@ class LoadBalancerController(object):
         msg.data = ether.pack()
         msg.actions.append(of.ofp_action_output(port=outport))
         self.connection.send(msg)
-        log.info("Sent ARP reply: %s is-at %s (to port %s)", arp_reply.protosrc, reply_mac, outport)
+        log.info("ARP Reply")
 
     def _install_virt_flow(self, client_ip, client_mac, server_ip, server_mac, client_port):
         server_port = int(str(server_ip)[-1])
 
-        fm_c2s = of.ofp_flow_mod()
-        fm_c2s.match.in_port = client_port
-        fm_c2s.match.dl_type = 0x0800
-        fm_c2s.match.nw_dst = self.virtual_ip
-        fm_c2s.actions.append(of.ofp_action_nw_addr.set_dst(server_ip))
-        fm_c2s.actions.append(of.ofp_action_dl_addr.set_dst(server_mac))
-        fm_c2s.actions.append(of.ofp_action_output(port=server_port))
-        self.connection.send(fm_c2s)
-        log.info("Installed virtual flow: Client %s -> Server %s", client_ip, server_ip)
+        msgc = of.ofp_flow_mod()
+        msgc.match.in_port = client_port
+        msgc.match.dl_type = 0x0800
+        msgc.match.nw_dst = self.virtual_ip
+        msgc.actions.append(of.ofp_action_nw_addr.set_dst(server_ip))
+        msgc.actions.append(of.ofp_action_dl_addr.set_dst(server_mac))
+        msgc.actions.append(of.ofp_action_output(port=server_port))
+        self.connection.send(msgc)
+        log.info("Virt flow c-s")
 
-        fm_s2c = of.ofp_flow_mod()
-        fm_s2c.match.in_port = server_port
-        fm_s2c.match.dl_type = 0x0800
-        fm_s2c.match.nw_src = server_ip
-        fm_s2c.match.nw_dst = client_ip
-        fm_s2c.actions.append(of.ofp_action_nw_addr.set_src(self.virtual_ip))
-        fm_s2c.actions.append(of.ofp_action_output(port=client_port))
-        self.connection.send(fm_s2c)
-        log.info("Installed virtual flow: Server %s -> Client %s", server_ip, client_ip)
+        msgs = of.ofp_flow_mod()
+        msgs.match.in_port = server_port
+        msgs.match.dl_type = 0x0800
+        msgs.match.nw_src = server_ip
+        msgs.match.nw_dst = client_ip
+        msgs.actions.append(of.ofp_action_nw_addr.set_src(self.virtual_ip))
+        msgs.actions.append(of.ofp_action_output(port=client_port))
+        self.connection.send(msgs)
+        log.info("Virt flow s-c")
 
     def _install_flow(self, client_ip, client_mac, server_ip, server_mac, client_port):
         server_port = int(str(server_ip)[-1])
 
-        fm_c2s = of.ofp_flow_mod()
-        fm_c2s.match.in_port = client_port
-        fm_c2s.match.dl_type = 0x0800
-        fm_c2s.match.nw_dst = server_ip
-        fm_c2s.actions.append(of.ofp_action_output(port=server_port))
-        self.connection.send(fm_c2s)
-        log.info("Installed direct flow: Client %s -> Server %s", client_ip, server_ip)
+        msgc = of.ofp_flow_mod()
+        msgc.match.in_port = client_port
+        msgc.match.dl_type = 0x0800
+        msgc.match.nw_dst = server_ip
+        msgc.actions.append(of.ofp_action_output(port=server_port))
+        self.connection.send(msgc)
+        log.info("flow c-s")
 
-        fm_s2c = of.ofp_flow_mod()
-        fm_s2c.match.in_port = server_port
-        fm_s2c.match.dl_type = 0x0800
-        fm_s2c.match.nw_src = server_ip
-        fm_s2c.match.nw_dst = client_ip
-        fm_s2c.actions.append(of.ofp_action_output(port=client_port))
-        self.connection.send(fm_s2c)
-        log.info("Installed direct flow: Server %s -> Client %s", server_ip, client_ip)
+        msgs = of.ofp_flow_mod()
+        msgs.match.in_port = server_port
+        msgs.match.dl_type = 0x0800
+        msgs.match.nw_src = server_ip
+        msgs.match.nw_dst = client_ip
+        msgs.actions.append(of.ofp_action_output(port=client_port))
+        self.connection.send(msgs)
+        log.info("flow s-c")
 
     def _flood(self, event):
         msg = of.ofp_packet_out()
