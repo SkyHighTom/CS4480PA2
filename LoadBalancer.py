@@ -75,10 +75,6 @@ def _handle_PacketIn(event):
         
         if arp_packet.opcode == pkt.arp.REQUEST:
             mac = getMac[dest]
-            client_port = int(str(getIPFromMac[mac])[-1])
-            server_port = int(str(dest)[-1])
-            install_flow_rule(pkt.ethernet.ARP_TYPE, client_port, server_port, actual_ip, connection)
-
             arp_reply = pkt.arp()
             arp_reply.hwsrc = mac
             arp_reply.hwdst = packet.src
@@ -96,8 +92,11 @@ def _handle_PacketIn(event):
             packet_out.actions.append(of.ofp_action_output(port=event.port))
             connection.send(packet_out)
 
+            client_port = int(str(getIPFromMac[mac])[-1])
+            server_port = int(str(dest)[-1])
+            install_flow_rule(pkt.ethernet.ARP_TYPE, client_port, server_port, actual_ip, connection)
             if actual_ip not in server_ips:
-                install_flow_rule(pkt.ethernet.IP_TYPE, client_port, server_port, actual_ip, connection)
+                install_flow_rule(pkt.ethernet.IP_TYPE, server_port, client_port, actual_ip, connection)
 
         elif arp_packet.opcode == pkt.arp.REPLY:
             log.info("REPLY")
