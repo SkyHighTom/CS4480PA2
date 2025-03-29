@@ -1,73 +1,146 @@
-# Import POX libraries
-from pox.core import core  # Main POX object
-import pox.openflow.libopenflow_01 as of  # OpenFlow 1.0 library
-import pox.lib.packet as pkt  # Packet parsing/construction
-from pox.lib.addresses import EthAddr, IPAddr  # Address types
-import pox.lib.util as poxutil  # Utility functions
-import pox.lib.revent as revent  # Event library
-import pox.lib.recoco as recoco  # Multitasking library
+from pox.core import core
+import pox.openflow.libopenflow_01 as of
+from pox.lib.addresses import IPAddr, EthAddr
+import pox.lib.packet as pkt
 
-# Create a logger
 log = core.getLogger()
 
-class LoadBalancerController:
-    def __init__(self, event):
-        self.datapath = event.connection
-        self.arp_table = {}  # Improved ARP table handling
-        self.round_robin = {}  # Retained round-robin approach for multiple VIPs
-        self.flow_rules_installed = set()
+class LoadBalancerController(object):
+    def __init__(self, connection):
+        self.connection = connection
+        self.virtual_gateway = IPAddr("10.0.0.10")
+        self.backend_ips = [IPAddr("10.0.0.5"), IPAddr("10.0.0.6")]
+        self.backend_macs = [EthAddr("00:00:00:00:00:05"),
+                              EthAddr("00:00:00:00:00:06")]
+        self.round_robin_index = 0
+        self.address_table = {}
+        self.client_allocation = {}
+        connection.addListeners(self)
 
-    def handle_packet_in(self, msg):
-        if self.is_arp_request(msg):
-            self.process_arp_request(msg)
-        elif self.is_tcp_packet(msg):
-            self.process_tcp_packet(msg)
+    def _select_backend(self):
+        chosen_ip = self.backend_ips[self.round_robin_index]
+        chosen_mac = self.backend_macs[self.round_robin_index]
+        self.round_robin_index = (self.round_robin_index + 1) % len(self.backend_ips)
+        return chosen_ip, chosen_mac
 
-    def process_arp_request(self, msg):
-        vip = self.extract_virtual_ip(msg)
-        if vip in self.arp_table:
-            self.reply_arp(msg, self.arp_table[vip])
+    def _handle_PacketIn(self, event):
+        packet = event.parsed
+        if not packet:
+            return
+        src_port = event.port
+        self._refresh_address_table(packet, src_port)
+
+        if packet.type == pkt.ARP_TYPE:
+            arp_payload = packet.payload
+            if arp_payload.opcode == pkt.arp.REQUEST:
+                if arp_payload.protodst == self.virtual_gateway:
+                    client_ip = arp_payload.protosrc
+                    if client_ip in self.client_allocation:
+                        target_ip, target_mac = self.client_allocation[client_ip]
+                        log.info("Client %s reuses backend %s", client_ip, target_ip)
+                    else:
+                        target_ip, target_mac = self._select_backend()
+                        self.client_allocation[client_ip] = (target_ip, target_mac)
+                        log.info("New client %s assigned backend %s", client_ip, target_ip)
+                    self._dispatch_arp_reply(event, arp_payload, target_mac, src_port)
+                    self._deploy_virtual_routing(client_ip, packet.src, target_ip, target_mac, src_port)
+                else:
+                    if arp_payload.protodst in self.address_table:
+                        known_mac, _ = self.address_table[arp_payload.protodst]
+                        self._dispatch_arp_reply(event, arp_payload, known_mac, src_port,
+                                                 override_ip=arp_payload.protodst)
+                    else:
+                        self._broadcast(event)
+            return
+
+        elif packet.type == pkt.ethernet.IP_TYPE:
+            ip_payload = packet.payload
+            if ip_payload.dstip == self.virtual_gateway:
+                client_ip = ip_payload.srcip
+                if client_ip in self.client_allocation:
+                    target_ip, target_mac = self.client_allocation[client_ip]
+                    log.info("Forwarding from %s via allocated backend %s", client_ip, target_ip)
+                else:
+                    target_ip, target_mac = self._select_backend()
+                    self.client_allocation[client_ip] = (target_ip, target_mac)
+                    log.info("Assigning %s to backend %s", client_ip, target_ip)
+                    self._deploy_virtual_routing(client_ip, packet.src, target_ip, target_mac, src_port)
+                backend_port = 5 if str(target_ip) == "10.0.0.5" else 6
+                msg = of.ofp_packet_out()
+                msg.data = event.ofp.data
+                msg.actions.append(of.ofp_action_nw_addr.set_dst(target_ip))
+                msg.actions.append(of.ofp_action_dl_addr.set_dst(target_mac))
+                msg.actions.append(of.ofp_action_output(port=backend_port))
+                self.connection.send(msg)
+                log.info("Packet from %s routed to backend %s", client_ip, target_ip)
+            else:
+                log.info("Packet not for virtual gateway, flooding")
+                self._broadcast(event)
+            return
+
         else:
-            self.forward_arp_request(msg)
+            self._broadcast(event)
 
-    def process_tcp_packet(self, msg):
-        vip = self.extract_virtual_ip(msg)
-        if vip in self.round_robin:
-            backend_ip = self.get_next_backend(vip)
-            self.install_bidirectional_flow_rules(msg, backend_ip)
-            self.forward_tcp_packet(msg, backend_ip)
+    def _refresh_address_table(self, packet, src_port):
+        if packet.type == pkt.ethernet.ARP_TYPE:
+            arp_payload = packet.payload
+            if arp_payload.opcode in (pkt.arp.REQUEST, pkt.arp.REPLY):
+                self.address_table[arp_payload.protosrc] = (arp_payload.hwsrc, src_port)
+        elif packet.type == pkt.ethernet.IP_TYPE:
+            ip_payload = packet.npayload
+            self.address_table[ip_payload.srcip] = (packet.src, src_port)
 
-    def install_bidirectional_flow_rules(self, msg, backend_ip):
-        client_ip = self.extract_client_ip(msg)
-        if (client_ip, backend_ip) not in self.flow_rules_installed:
-            self.add_flow_rule(msg, client_ip, backend_ip, direction="client_to_server")
-            self.add_flow_rule(msg, backend_ip, client_ip, direction="server_to_client")
-            self.flow_rules_installed.add((client_ip, backend_ip))
+    def _dispatch_arp_reply(self, event, arp_request, reply_mac, output_port, override_ip=None):
+        response = pkt.arp()
+        response.opcode = pkt.arp.REPLY
+        response.hwdst = arp_request.hwsrc
+        response.protodst = arp_request.protosrc
+        response.protosrc = override_ip if override_ip else self.virtual_gateway
+        response.hwsrc = reply_mac
 
-    def add_flow_rule(self, msg, src_ip, dst_ip, direction):
-        flow_mod = self.create_flow_mod(msg, src_ip, dst_ip, direction)
-        self.datapath.send(flow_mod)
+        eth_frame = pkt.ethernet()
+        eth_frame.type = pkt.ethernet.ARP_TYPE
+        eth_frame.dst = arp_request.hwsrc
+        eth_frame.src = reply_mac
+        eth_frame.set_payload(response)
 
-    def get_next_backend(self, vip):
-        backend_list = self.round_robin[vip]
-        backend = backend_list.pop(0)
-        backend_list.append(backend)  # Rotate backend selection
-        return backend
+        msg = of.ofp_packet_out()
+        msg.data = eth_frame.pack()
+        msg.actions.append(of.ofp_action_output(port=output_port))
+        self.connection.send(msg)
+        log.info("Dispatched ARP reply for %s at %s to port %s", response.protosrc, reply_mac, output_port)
 
-    def create_flow_mod(self, msg, src_ip, dst_ip, direction):
-        flow_mod = of.ofp_flow_mod()
-        flow_mod.match.dl_type = pkt.ethernet.IP_TYPE
-        flow_mod.match.nw_src = src_ip
-        flow_mod.match.nw_dst = dst_ip
-        if direction == "client_to_server":
-            flow_mod.actions.append(of.ofp_action_nw_addr.set_dst(dst_ip))
-        else:
-            flow_mod.actions.append(of.ofp_action_nw_addr.set_src(src_ip))
-        return flow_mod
+    def _deploy_virtual_routing(self, client_ip, client_mac, backend_ip, backend_mac, client_port):
+        backend_port = 5 if str(backend_ip) == "10.0.0.5" else 6
 
-@poxutil.eval_args
+        flow_to_backend = of.ofp_flow_mod()
+        flow_to_backend.match.in_port = client_port
+        flow_to_backend.match.dl_type = 0x0800
+        flow_to_backend.match.nw_dst = self.virtual_gateway
+        flow_to_backend.actions.append(of.ofp_action_nw_addr.set_dst(backend_ip))
+        flow_to_backend.actions.append(of.ofp_action_dl_addr.set_dst(backend_mac))
+        flow_to_backend.actions.append(of.ofp_action_output(port=backend_port))
+        self.connection.send(flow_to_backend)
+        log.info("Flow set: %s -> %s", client_ip, backend_ip)
+
+        flow_to_client = of.ofp_flow_mod()
+        flow_to_client.match.in_port = backend_port
+        flow_to_client.match.dl_type = 0x0800
+        flow_to_client.match.nw_src = backend_ip
+        flow_to_client.match.nw_dst = client_ip
+        flow_to_client.actions.append(of.ofp_action_nw_addr.set_src(self.virtual_gateway))
+        flow_to_client.actions.append(of.ofp_action_output(port=client_port))
+        self.connection.send(flow_to_client)
+        log.info("Flow set: %s -> %s", backend_ip, client_ip)
+
+    def _broadcast(self, event):
+        msg = of.ofp_packet_out()
+        msg.buffer_id = event.ofp.buffer_id
+        msg.in_port = event.port
+        msg.actions.append(of.ofp_action_output(port=of.OFPP_FLOOD))
+        self.connection.send(msg)
+
 def launch():
-    def _go_up(event):
-        log.info("Connection up")
-        LoadBalancerController(event)
-    core.openflow.addListenerByName("ConnectionUp", _go_up)
+    def activate_switch(event):
+        LoadBalancerController(event.connection)
+    core.openflow.addListenerByName("ConnectionUp", activate_switch)
