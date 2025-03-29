@@ -17,6 +17,7 @@ class LoadBalancerController(object):
         self.client_ips = [IPAddr(f"10.0.0.{i}") for i in range(1, 5)]
         self.server_ips = [IPAddr("10.0.0.5"), IPAddr("10.0.0.6")]
 
+        self.round_robin = {}
         self.current_server = 0
         self.arp_tbl = {}
         connection.addListeners(self)
@@ -24,9 +25,8 @@ class LoadBalancerController(object):
 
     def _pick_round_robin(self):
         server_ip = self.server_ips[self.current_server]
-        server_mac = self.getMac[server_ip]
         self.current_server = (self.current_server + 1) % len(self.server_ips)
-        return server_ip, server_mac
+        return server_ip
 
     def _handle_PacketIn(self, event):
         packet = event.parsed
@@ -43,8 +43,9 @@ class LoadBalancerController(object):
                     if client_ip in self.round_robin:
                         server_ip, server_mac = self.round_robin[client_ip]
                     else:
-                        server_ip, server_mac = self._pick_round_robin()
-                        self.round_robin[client_ip] = (server_ip, server_mac)
+                        server_ip = self._pick_round_robin()
+                        server_mac = self.getMac[server_ip]
+                        self.round_robin[client_ip] = server_ip
                         log.info("Assigning client to server")
                     self._send_arp(event, arp_pkt, server_mac, inport)
                     self._install_virt_flow(client_ip, packet.src, server_ip, server_mac, inport)
