@@ -8,132 +8,173 @@ log = core.getLogger()
 class LoadBalancerController(object):
     def __init__(self, connection):
         self.connection = connection
-        self.virtual_gateway = IPAddr("10.0.0.10")
-        self.backend_ips = [IPAddr("10.0.0.5"), IPAddr("10.0.0.6")]
-        self.backend_macs = [EthAddr("00:00:00:00:00:05"),
-                              EthAddr("00:00:00:00:00:06")]
-        self.round_robin_index = 0
-        self.address_table = {}
-        self.client_allocation = {}
-        connection.addListeners(self)
+        self.virtual_ip = IPAddr("10.0.0.10")
+        # Static MAC and IP mappings
+        self.getMac = {IPAddr(f"10.0.0.{i}"): EthAddr(f"00:00:00:00:00:0{i}") for i in range(1, 7)}
+        self.getIPFromMac = {v: k for k, v in self.getMac.items()}
 
-    def _select_backend(self):
-        chosen_ip = self.backend_ips[self.round_robin_index]
-        chosen_mac = self.backend_macs[self.round_robin_index]
-        self.round_robin_index = (self.round_robin_index + 1) % len(self.backend_ips)
-        return chosen_ip, chosen_mac
+        # Client and server IPs
+        self.client_ips = [IPAddr(f"10.0.0.{i}") for i in range(1, 5)]
+        self.server_ips = [IPAddr("10.0.0.5"), IPAddr("10.0.0.6")]
+
+        self.current_server = 0
+        self.arp_table = {}
+        self.round_robin = {}
+        connection.addListeners(self)
+        log.info("Connected")
+
+    def _pick_round_robin(self):
+        server_ip = self.server_ips[self.current_server]
+        server_mac = self.getMac[server_ip]
+        self.current_server = (self.current_server + 1) % len(self.server_ips)
+        return server_ip, server_mac
 
     def _handle_PacketIn(self, event):
         packet = event.parsed
         if not packet:
             return
-        src_port = event.port
-        self._refresh_address_table(packet, src_port)
+        inport = event.port
+        self._update_arp(packet, inport)
 
         if packet.type == packet.ARP_TYPE:
-            arp_payload = packet.payload
-            if arp_payload.opcode == pkt.arp.REQUEST:
-                if arp_payload.protodst == self.virtual_gateway:
-                    client_ip = arp_payload.protosrc
-                    if client_ip in self.client_allocation:
-                        target_ip, target_mac = self.client_allocation[client_ip]
-                        log.info("Client %s reuses backend %s", client_ip, target_ip)
+            arp_pkt = packet.next
+            if arp_pkt.opcode == pkt.arp.REQUEST:
+                if arp_pkt.protodst == self.virtual_ip:
+                    client_ip = arp_pkt.protosrc
+                    if client_ip in self.round_robin:
+                        server_ip, server_mac = self.round_robin[client_ip]
+                        log.info("Client %s already assigned to server %s", client_ip, server_ip)
                     else:
-                        target_ip, target_mac = self._select_backend()
-                        self.client_allocation[client_ip] = (target_ip, target_mac)
-                        log.info("New client %s assigned backend %s", client_ip, target_ip)
-                    self._dispatch_arp_reply(event, arp_payload, target_mac, src_port)
-                    self._deploy_virtual_routing(client_ip, packet.src, target_ip, target_mac, src_port)
+                        server_ip, server_mac = self._pick_round_robin()
+                        self.round_robin[client_ip] = (server_ip, server_mac)
+                        log.info("Assigning client %s to server %s", client_ip, server_ip)
+                    self._send_arp(event, arp_pkt, server_mac, inport)
+                    self._install_virt_flow(client_ip, packet.src, server_ip, server_mac, inport)
                 else:
-                    if arp_payload.protodst in self.address_table:
-                        known_mac, _ = self.address_table[arp_payload.protodst]
-                        self._dispatch_arp_reply(event, arp_payload, known_mac, src_port,
-                                                 override_ip=arp_payload.protodst)
+                    if arp_pkt.protodst in self.arp_table:
+                        dst_mac, _ = self.arp_table[arp_pkt.protodst]
+                        self._send_arp(event, arp_pkt, dst_mac, inport,
+                                             override_ip=arp_pkt.protodst)
                     else:
-                        self._broadcast(event)
+                        self._flood(event)
             return
 
-        elif packet.type == packet.ethernet.IP_TYPE:
-            ip_payload = packet.payload
-            if ip_payload.dstip == self.virtual_gateway:
-                client_ip = ip_payload.srcip
-                if client_ip in self.client_allocation:
-                    target_ip, target_mac = self.client_allocation[client_ip]
-                    log.info("Forwarding from %s via allocated backend %s", client_ip, target_ip)
+        elif packet.type == packet.IP_TYPE:
+            ip_pkt = packet.next
+            if ip_pkt.dstip == self.virtual_ip:
+                client_ip = ip_pkt.srcip
+                if client_ip in self.round_robin:
+                    server_ip, server_mac = self.round_robin[client_ip]
+                    log.info("Processing IP packet from client %s using assigned server %s", client_ip, server_ip)
                 else:
-                    target_ip, target_mac = self._select_backend()
-                    self.client_allocation[client_ip] = (target_ip, target_mac)
-                    log.info("Assigning %s to backend %s", client_ip, target_ip)
-                    self._deploy_virtual_routing(client_ip, packet.src, target_ip, target_mac, src_port)
-                backend_port = 5 if str(target_ip) == "10.0.0.5" else 6
+                    server_ip, server_mac = self._pick_round_robin()
+                    self.round_robin[client_ip] = (server_ip, server_mac)
+                    log.info("Assigning client %s to server %s (via virtual IP)", client_ip, server_ip)
+                    self._install_virt_flow(client_ip, packet.src, server_ip, server_mac, inport)
+
+                server_port = int(str(server_ip)[-1])
                 msg = of.ofp_packet_out()
                 msg.data = event.ofp.data
-                msg.actions.append(of.ofp_action_nw_addr.set_dst(target_ip))
-                msg.actions.append(of.ofp_action_dl_addr.set_dst(target_mac))
-                msg.actions.append(of.ofp_action_output(port=backend_port))
+                msg.actions.append(of.ofp_action_nw_addr.set_dst(server_ip))
+                msg.actions.append(of.ofp_action_dl_addr.set_dst(server_mac))
+                msg.actions.append(of.ofp_action_output(port=server_port))
                 self.connection.send(msg)
-                log.info("Packet from %s routed to backend %s", client_ip, target_ip)
+                log.info("Redirected IP packet from client %s (virtual IP) to server %s", client_ip, server_ip)
+            elif ip_pkt.dstip in self.server_ips:
+                client_ip = ip_pkt.srcip
+                server_ip = ip_pkt.dstip
+                server_mac = self.getMac[server_ip]
+                if client_ip not in self.round_robin:
+                    self.round_robin[client_ip] = (server_ip, server_mac)
+                    log.info("Direct assignment: Client %s assigned to server %s", client_ip, server_ip)
+                self._install_flow(client_ip, packet.src, server_ip, server_mac, inport)
+                server_port = int(str(server_ip)[-1])
+                msg = of.ofp_packet_out()
+                msg.data = event.ofp.data
+                msg.actions.append(of.ofp_action_output(port=server_port))
+                self.connection.send(msg)
+                log.info("Redirected direct IP packet from client %s to server %s", client_ip, server_ip)
             else:
-                log.info("Packet not for virtual gateway, flooding")
-                self._broadcast(event)
+                log.info("Received IP packet not destined for virtual IP or known server; flooding")
+                self._flood(event)
             return
 
         else:
-            self._broadcast(event)
+            self._flood(event)
 
-    def _refresh_address_table(self, packet, src_port):
+    def _update_arp(self, packet, inport):
         if packet.type == pkt.ethernet.ARP_TYPE:
-            arp_payload = packet.payload
-            if arp_payload.opcode in (pkt.arp.REQUEST, pkt.arp.REPLY):
-                self.address_table[arp_payload.protosrc] = (arp_payload.hwsrc, src_port)
+            arp_pkt = packet.next
+            if arp_pkt.opcode in (pkt.arp.REQUEST, pkt.arp.REPLY):
+                self.arp_table[arp_pkt.protosrc] = (arp_pkt.hwsrc, inport)
         elif packet.type == pkt.ethernet.IP_TYPE:
-            ip_payload = packet.npayload
-            self.address_table[ip_payload.srcip] = (packet.src, src_port)
+            ip_pkt = packet.next
+            self.arp_table[ip_pkt.srcip] = (packet.src, inport)
 
-    def _dispatch_arp_reply(self, event, arp_request, reply_mac, output_port, override_ip=None):
-        response = pkt.arp()
-        response.opcode = pkt.arp.REPLY
-        response.hwdst = arp_request.hwsrc
-        response.protodst = arp_request.protosrc
-        response.protosrc = override_ip if override_ip else self.virtual_gateway
-        response.hwsrc = reply_mac
+    def _send_arp(self, event, arp_req, reply_mac, outport, override_ip=None):
+        arp_reply = pkt.arp()
+        arp_reply.opcode = pkt.arp.REPLY
+        arp_reply.hwdst = arp_req.hwsrc
+        arp_reply.protodst = arp_req.protosrc
+        arp_reply.protosrc = override_ip if override_ip else self.virtual_ip
+        arp_reply.hwsrc = reply_mac
 
-        eth_frame = pkt.ethernet()
-        eth_frame.type = pkt.ethernet.ARP_TYPE
-        eth_frame.dst = arp_request.hwsrc
-        eth_frame.src = reply_mac
-        eth_frame.set_payload(response)
+        ether = pkt.ethernet()
+        ether.type = pkt.ethernet.ARP_TYPE
+        ether.dst = arp_req.hwsrc
+        ether.src = reply_mac
+        ether.set_payload(arp_reply)
 
         msg = of.ofp_packet_out()
-        msg.data = eth_frame.pack()
-        msg.actions.append(of.ofp_action_output(port=output_port))
+        msg.data = ether.pack()
+        msg.actions.append(of.ofp_action_output(port=outport))
         self.connection.send(msg)
-        log.info("Dispatched ARP reply for %s at %s to port %s", response.protosrc, reply_mac, output_port)
+        log.info("Sent ARP reply: %s is-at %s (to port %s)", arp_reply.protosrc, reply_mac, outport)
 
-    def _deploy_virtual_routing(self, client_ip, client_mac, backend_ip, backend_mac, client_port):
-        backend_port = 5 if str(backend_ip) == "10.0.0.5" else 6
+    def _install_virt_flow(self, client_ip, client_mac, server_ip, server_mac, client_port):
+        server_port = int(str(server_ip)[-1])
 
-        flow_to_backend = of.ofp_flow_mod()
-        flow_to_backend.match.in_port = client_port
-        flow_to_backend.match.dl_type = 0x0800
-        flow_to_backend.match.nw_dst = self.virtual_gateway
-        flow_to_backend.actions.append(of.ofp_action_nw_addr.set_dst(backend_ip))
-        flow_to_backend.actions.append(of.ofp_action_dl_addr.set_dst(backend_mac))
-        flow_to_backend.actions.append(of.ofp_action_output(port=backend_port))
-        self.connection.send(flow_to_backend)
-        log.info("Flow set: %s -> %s", client_ip, backend_ip)
+        fm_c2s = of.ofp_flow_mod()
+        fm_c2s.match.in_port = client_port
+        fm_c2s.match.dl_type = 0x0800
+        fm_c2s.match.nw_dst = self.virtual_ip
+        fm_c2s.actions.append(of.ofp_action_nw_addr.set_dst(server_ip))
+        fm_c2s.actions.append(of.ofp_action_dl_addr.set_dst(server_mac))
+        fm_c2s.actions.append(of.ofp_action_output(port=server_port))
+        self.connection.send(fm_c2s)
+        log.info("Installed virtual flow: Client %s -> Server %s", client_ip, server_ip)
 
-        flow_to_client = of.ofp_flow_mod()
-        flow_to_client.match.in_port = backend_port
-        flow_to_client.match.dl_type = 0x0800
-        flow_to_client.match.nw_src = backend_ip
-        flow_to_client.match.nw_dst = client_ip
-        flow_to_client.actions.append(of.ofp_action_nw_addr.set_src(self.virtual_gateway))
-        flow_to_client.actions.append(of.ofp_action_output(port=client_port))
-        self.connection.send(flow_to_client)
-        log.info("Flow set: %s -> %s", backend_ip, client_ip)
+        fm_s2c = of.ofp_flow_mod()
+        fm_s2c.match.in_port = server_port
+        fm_s2c.match.dl_type = 0x0800
+        fm_s2c.match.nw_src = server_ip
+        fm_s2c.match.nw_dst = client_ip
+        fm_s2c.actions.append(of.ofp_action_nw_addr.set_src(self.virtual_ip))
+        fm_s2c.actions.append(of.ofp_action_output(port=client_port))
+        self.connection.send(fm_s2c)
+        log.info("Installed virtual flow: Server %s -> Client %s", server_ip, client_ip)
 
-    def _broadcast(self, event):
+    def _install_flow(self, client_ip, client_mac, server_ip, server_mac, client_port):
+        server_port = int(str(server_ip)[-1])
+
+        fm_c2s = of.ofp_flow_mod()
+        fm_c2s.match.in_port = client_port
+        fm_c2s.match.dl_type = 0x0800
+        fm_c2s.match.nw_dst = server_ip
+        fm_c2s.actions.append(of.ofp_action_output(port=server_port))
+        self.connection.send(fm_c2s)
+        log.info("Installed direct flow: Client %s -> Server %s", client_ip, server_ip)
+
+        fm_s2c = of.ofp_flow_mod()
+        fm_s2c.match.in_port = server_port
+        fm_s2c.match.dl_type = 0x0800
+        fm_s2c.match.nw_src = server_ip
+        fm_s2c.match.nw_dst = client_ip
+        fm_s2c.actions.append(of.ofp_action_output(port=client_port))
+        self.connection.send(fm_s2c)
+        log.info("Installed direct flow: Server %s -> Client %s", server_ip, client_ip)
+
+    def _flood(self, event):
         msg = of.ofp_packet_out()
         msg.buffer_id = event.ofp.buffer_id
         msg.in_port = event.port
@@ -141,6 +182,6 @@ class LoadBalancerController(object):
         self.connection.send(msg)
 
 def launch():
-    def activate_switch(event):
+    def _go_up(event):
         LoadBalancerController(event.connection)
-    core.openflow.addListenerByName("ConnectionUp", activate_switch)
+    core.openflow.addListenerByName("ConnectionUp", _go_up)
