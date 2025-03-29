@@ -19,7 +19,6 @@ class LoadBalancerController(object):
 
         self.current_server = 0
         self.arp_tbl = {}
-        self.round_robin = {}
         connection.addListeners(self)
         log.info("Connected")
 
@@ -59,15 +58,17 @@ class LoadBalancerController(object):
             return
 
         elif packet.type == packet.IP_TYPE:
-            ip_pkt = packet.next
-            if ip_pkt.dstip == self.virtual_ip:
-                client_ip = ip_pkt.srcip
+            ip_packet = packet.next
+            if ip_packet.dstip == self.virtual_ip:
+                client_ip = ip_packet.srcip
                 if client_ip in self.round_robin:
-                    server_ip, server_mac = self.round_robin[client_ip]
+                    server_ip = self.round_robin[client_ip]
+                    server_mac = self.getMac[server_ip]
                     log.info("IP from client assigned server")
                 else:
-                    server_ip, server_mac = self._pick_round_robin()
-                    self.round_robin[client_ip] = (server_ip, server_mac)
+                    server_ip = self._pick_round_robin()
+                    server_mac = self.getMac[server_ip]
+                    self.round_robin[client_ip] = server_ip
                     log.info("IP assigning client server")
                     self._install_virt_flow(client_ip, packet.src, server_ip, server_mac, inport)
 
@@ -79,12 +80,12 @@ class LoadBalancerController(object):
                 msg.actions.append(of.ofp_action_output(port=server_port))
                 self.connection.send(msg)
                 log.info("IP packet redirected")
-            elif ip_pkt.dstip in self.server_ips:
-                client_ip = ip_pkt.srcip
-                server_ip = ip_pkt.dstip
+            elif ip_packet.dstip in self.server_ips:
+                client_ip = ip_packet.srcip
+                server_ip = ip_packet.dstip
                 server_mac = self.getMac[server_ip]
                 if client_ip not in self.round_robin:
-                    self.round_robin[client_ip] = (server_ip, server_mac)
+                    self.round_robin[client_ip] = server_ip
                     log.info("IP direct client assigned server")
                 self._install_flow(client_ip, packet.src, server_ip, server_mac, inport)
                 server_port = int(str(server_ip)[-1])
