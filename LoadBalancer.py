@@ -37,6 +37,7 @@ class LoadBalancerController(object):
         self._update_arp(packet, inport)
 
         if packet.type == packet.ARP_TYPE:
+            log.info("ARP")
             arp_pkt = packet.next
             if arp_pkt.opcode == pkt.arp.REQUEST:
                 if arp_pkt.protodst == self.virtual_ip:
@@ -60,6 +61,7 @@ class LoadBalancerController(object):
             return
 
         elif packet.type == packet.IP_TYPE:
+            log.info("IP")
             ip_packet = packet.next
             if ip_packet.dstip == self.virtual_ip:
                 client_ip = ip_packet.srcip
