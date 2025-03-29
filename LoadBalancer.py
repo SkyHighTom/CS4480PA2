@@ -52,12 +52,16 @@ class LoadBalancerController(object):
                     self._send_arp(event, arp_pkt, server_mac, inport)
                     self._install_virt_flow(client_ip, packet.src, server_ip, server_mac, inport)
                 else:
+                    log.info("not arp reply")
                     if arp_pkt.protodst in self.arp_tbl:
                         dst_mac, _ = self.arp_tbl[arp_pkt.protodst]
                         self._send_arp(event, arp_pkt, dst_mac, inport,
                                              override_ip=arp_pkt.protodst)
                     else:
                         self._flood(event)
+            elif arp_pkt.opcode == pkt.arp.REPLY:
+                log.info("arp reply")
+
             return
 
         elif packet.type == packet.IP_TYPE:
