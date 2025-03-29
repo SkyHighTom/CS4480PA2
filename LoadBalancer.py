@@ -95,7 +95,7 @@ def _handle_PacketIn(event):
             client_port = int(str(getIPFromMac[mac])[-1])
             server_port = int(str(dest)[-1])
             install_flow_rule(pkt.ethernet.ARP_TYPE, client_port, server_port, actual_ip, connection)
-            if actual_ip not in server_ips:
+            if actual_ip not in server_ips and actual_ip not in server_ips:
                 install_flow_rule(pkt.ethernet.IP_TYPE, server_port, client_port, actual_ip, connection)
 
         elif arp_packet.opcode == pkt.arp.REPLY:
