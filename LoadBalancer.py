@@ -114,7 +114,7 @@ def _handle_PacketIn(event):
         client_port = int(str(ip_packet.srcip)[-1])
         server_port = int(str(backend_ip)[-1])
         
-        install_flow_rule(pkt.ethernet.IP_TYPE, server_port, client_port, actual_ip, connection)
+        install_flow_rule(pkt.ethernet.IP_TYPE, client_port, server_port, actual_ip, connection)
         
         # Modify the packet for load balancing
         ip_packet.dstip = backend_ip
