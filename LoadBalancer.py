@@ -11,10 +11,10 @@ import pox.lib.recoco as recoco  # Multitasking library
 log = core.getLogger()
 
 class LoadBalancerController:
-    def __init__(self, datapath, arp_table, round_robin):
-        self.datapath = datapath
-        self.arp_table = arp_table  # Improved ARP table handling
-        self.round_robin = round_robin  # Retained round-robin approach for multiple VIPs
+    def __init__(self, event):
+        self.datapath = event.connection
+        self.arp_table = {}  # Improved ARP table handling
+        self.round_robin = {}  # Retained round-robin approach for multiple VIPs
         self.flow_rules_installed = set()
 
     def handle_packet_in(self, msg):
@@ -69,5 +69,5 @@ class LoadBalancerController:
 def launch():
     def _go_up(event):
         log.info("Connection up")
-        LoadBalancerController(event.connection)
-    core.addListenerByName("ConnectionUp", _go_up)
+        LoadBalancerController(event)
+    core.openflow.addListenerByName("ConnectionUp", _go_up)
