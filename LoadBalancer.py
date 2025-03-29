@@ -74,12 +74,12 @@ def _handle_PacketIn(event):
         dest = round_robin[arp_packet.protodst]
         
         if arp_packet.opcode == pkt.arp.REQUEST:
-            client_port = int(str(arp_packet.protosrc)[-1])
+            mac = getMac[dest]
+            client_port = int(str(getIPFromMac[mac])[-1])
             server_port = int(str(dest)[-1])
             install_flow_rule(pkt.ethernet.ARP_TYPE, client_port, server_port, actual_ip, connection)
-            
+
             arp_reply = pkt.arp()
-            mac = getMac[dest]
             arp_reply.hwsrc = mac
             arp_reply.hwdst = packet.src
             arp_reply.opcode = pkt.arp.REPLY
